@@ -1,4 +1,4 @@
-use axum::{Router, routing::{get, post}};
+use axum::{Router, extract::DefaultBodyLimit, routing::{get, post}};
 use dotenv::dotenv;
 use reqwest::Client;
 use sqlx::SqlitePool;
@@ -58,7 +58,7 @@ async fn main() {
         .ok()
         .and_then(|limit| limit.parse().ok())
         .map(|gb: u64| gb * 1024 * 1024 * 1024)
-        .unwrap_or(1 * 1024 * 1024 * 1024);
+        .unwrap_or(0);
 
     let max_file_size = env::var("MAX_FILE_SIZE")
         .ok()
@@ -189,6 +189,7 @@ async fn main() {
         .route("/", post(endpoints::upload_file))
         .route("/{id}", get(endpoints::get_file))
         .route("/info", get(endpoints::get_server_info))
+        .layer(DefaultBodyLimit::disable())
         .layer(CompressionLayer::new())
         .layer(CorsLayer::new()
             .allow_origin(cors::Any)

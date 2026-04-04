@@ -1,4 +1,4 @@
-use axum::{Json, extract::{Multipart, State}, http::{HeaderMap, StatusCode}, response::IntoResponse};
+use axum::{Json, extract::{FromRequest, Multipart, Request, State}, http::{HeaderMap, StatusCode}, response::IntoResponse};
 use reflink::reflink_or_copy;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -6,6 +6,27 @@ use tokio::{fs::{self, File}, io::AsyncWriteExt};
 use rand::{RngExt, distr::Alphanumeric};
 
 use crate::{AppState, db};
+
+pub struct MultipartForm(pub Multipart);
+
+impl<S: Send + Sync> FromRequest<S> for MultipartForm {
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    fn from_request(req: Request, state: &S) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        async move {
+            Multipart::from_request(req, state)
+                .await
+                .map(MultipartForm)
+                .map_err(|_| (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "Invalid/missing multipart form data",
+                        "id": null
+                    }))
+                ))
+        }
+    }
+}
 
 pub fn generate_id() -> String {
     rand::rng()
@@ -15,7 +36,7 @@ pub fn generate_id() -> String {
         .collect()
 }
 
-pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, mut multipart: Multipart) -> impl IntoResponse {
+pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, MultipartForm(mut multipart): MultipartForm,) -> impl IntoResponse {
     // If TOKEN is set, check if a Bearer was sent along the request
     if let Some(token) = &state.token {
         let authorization = headers
@@ -45,7 +66,7 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, mut 
             }))
         );
     }
-    
+
     let mut id = generate_id();
     while db::file_exists(&state.connection, &id).await {
         id = generate_id();
@@ -53,13 +74,30 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, mut 
 
     let temp_path = state.temporary_path.join(&id);
 
-    let storage_left = state.max_storage_limit.saturating_sub(db::get_total_size(&state.connection).await);
     let mut size: u64 = 0;
     let mut saved = false;
     let mut hasher = Sha256::new();
 
+    let storage_left = if state.max_storage_limit == 0 {
+        None
+    } else {
+        Some(state.max_storage_limit.saturating_sub(db::get_total_size(&state.connection).await))
+    };
+
     // Go through every field in the multipart form
-    while let Some(mut field) = multipart.next_field().await.unwrap() {
+    loop {
+        let mut field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(_) => return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "Invalid or missing multipart form data",
+                    "id": null
+                }))
+            ),
+        };
+
         match field.name().unwrap_or("") {
             "file" => {
                 let mut file = match File::create(&temp_path).await {
@@ -76,7 +114,24 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, mut 
                     }
                 };
 
-                while let Some(chunk) = field.chunk().await.unwrap() {
+                loop {
+                    let chunk = match field.chunk().await {
+                        Ok(Some(chunk)) => chunk,
+                        Ok(None) => break,
+                        Err(error) => {
+                            eprintln!("Failed to read chunk: {error}");
+                            drop(file);
+                            let _ = fs::remove_file(&temp_path).await;
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({
+                                    "error": "Failed reading uploaded file data",
+                                    "id": null
+                                }))
+                            );
+                        }
+                    };
+
                     size += chunk.len() as u64;
 
                     // Make sure it doesn't exceed the maximum file size limit
@@ -93,7 +148,7 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, mut 
                     }
 
                     // And that there is also enough storage left
-                    if size > storage_left {
+                    if storage_left.is_some_and(|left| size > left) {
                         drop(file);
                         let _ = fs::remove_file(&temp_path).await;
                         return (
@@ -125,7 +180,19 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, mut 
                 break;
             }
             "link" => {
-                let link = field.text().await.unwrap();
+                let link = match field.text().await {
+                    Ok(text) => text,
+                    Err(error) => {
+                        eprintln!("Failed to read link field: {error}");
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Failed reading the link field",
+                                "id": null
+                            }))
+                        );
+                    }
+                };
 
                 let mut response = match state.client.get(link).send().await {
                     Ok(response) => response,
@@ -155,7 +222,24 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, mut 
                     }
                 };
 
-                while let Some(chunk) = response.chunk().await.unwrap() {
+                loop {
+                    let chunk = match response.chunk().await {
+                        Ok(Some(chunk)) => chunk,
+                        Ok(None) => break,
+                        Err(error) => {
+                            eprintln!("Failed to read chunk from link: {error}");
+                            drop(file);
+                            let _ = fs::remove_file(&temp_path).await;
+                            return (
+                                StatusCode::BAD_GATEWAY,
+                                Json(json!({
+                                    "error": "Failed downloading from the link supplied",
+                                    "id": null
+                                }))
+                            );
+                        }
+                    };
+
                     size += chunk.len() as u64;
 
                     // Make sure it doesn't exceed the maximum file size limit
@@ -172,7 +256,7 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, mut 
                     }
 
                     // And that there is also enough storage left
-                    if size > storage_left {
+                    if storage_left.is_some_and(|left| size > left) {
                         drop(file);
                         let _ = fs::remove_file(&temp_path).await;
                         return (
@@ -222,13 +306,13 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, mut 
     // If the file already exists no need to recreate it
     if let Some(existing_id) = db::hash_exists(&state.connection, &hash).await {
         let _ = fs::remove_file(&temp_path).await;
-        return(
+        return (
             StatusCode::OK,
             Json(json!({
                 "error": null,
                 "id": existing_id
             }))
-        )
+        );
     }
 
     // First try writing the file to its actual destination

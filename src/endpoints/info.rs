@@ -7,10 +7,14 @@ pub async fn get_server_info(State(state): State<AppState>) -> Json<serde_json::
     let total_files = db::get_total_files(&state.connection).await;
     let total_size = db::get_total_size(&state.connection).await;
 
-    // All of this is just to make sure the application doesn't
-    // crash if total_files or total_size are 0
-    let estimated_max_files = if total_files > 0 && total_size > 0 {
+    let estimated_max_files = if state.max_storage_limit > 0 && total_files > 0 && total_size > 0 {
         Some(state.max_storage_limit / (total_size / total_files))
+    } else {
+        None
+    };
+
+    let max_size = if state.max_storage_limit > 0 {
+        Some(state.max_storage_limit)
     } else {
         None
     };
@@ -23,7 +27,7 @@ pub async fn get_server_info(State(state): State<AppState>) -> Json<serde_json::
             "total": total_files
         },
         "size": {
-            "max": state.max_storage_limit,
+            "max": max_size,
             "total": total_size
         }
     }))
