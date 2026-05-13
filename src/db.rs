@@ -25,18 +25,10 @@ pub async fn open() -> SqlitePool {
         .await
         .unwrap();
 
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS files (
-            id VARCHAR NOT NULL UNIQUE,
-            hash VARCHAR NOT NULL UNIQUE,
-            size INTEGER NOT NULL,
-            lastAccessedOn INTEGER,
-            PRIMARY KEY (id)
-        );"
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("Failed running SQL migrations");
 
     pool
 }
