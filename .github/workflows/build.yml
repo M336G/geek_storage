@@ -1,10 +1,6 @@
 name: "Build Binaries"
 on:
   push:
-    paths:
-      - "src/**"
-      - "Cargo.toml"
-      - ".github/workflows/build.yml"
     branches: [ main ]
 jobs:
   release:
