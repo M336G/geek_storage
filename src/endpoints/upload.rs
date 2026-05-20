@@ -2,7 +2,8 @@ use axum::{Json, extract::{FromRequest, Multipart, Request, State}, http::{Heade
 use reflink::reflink_or_copy;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tokio::{fs::{self, File}, io::AsyncWriteExt};
+use std::future::Future;
+use tokio::{fs::{self, File}, io::AsyncWriteExt, task::spawn_blocking};
 use rand::{RngExt, distr::Alphanumeric};
 
 use crate::{AppState, db};
@@ -195,7 +196,19 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, Mult
                 };
 
                 let mut response = match state.client.get(link).send().await {
-                    Ok(response) => response,
+                    Ok(response) => match response.error_for_status() {
+                        Ok(response) => response,
+                        Err(error) => {
+                            eprintln!("Failed link download: {error}");
+                            return (
+                                StatusCode::BAD_GATEWAY,
+                                Json(json!({
+                                    "error": "Failed downloading from the link supplied",
+                                    "id": null
+                                }))
+                            );
+                        }
+                    },
                     Err(error) => {
                         eprintln!("Failed link download: {error}");
                         return (
@@ -303,6 +316,21 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, Mult
 
     let hash = hex::encode(hasher.finalize());
 
+    // Make sure there is enough storage left
+    if state.max_storage_limit > 0 {
+        let current_total = db::get_total_size(&state.connection).await;
+        if current_total.saturating_add(size) > state.max_storage_limit {
+            let _ = fs::remove_file(&temp_path).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "The server is completely full!",
+                    "id": null
+                }))
+            );
+        }
+    }
+
     // If the file already exists no need to recreate it
     if let Some(existing_id) = db::hash_exists(&state.connection, &hash).await {
         let _ = fs::remove_file(&temp_path).await;
@@ -320,16 +348,33 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, Mult
     match fs::rename(&temp_path, &final_path).await {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
-            if let Err(error) = reflink_or_copy(&temp_path, &final_path) {
-                eprintln!("Failed to copy file: {error}");
-                let _ = fs::remove_file(&temp_path).await;
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": "Failed uploading your file",
-                        "id": null
-                    }))
-                );
+            let temp_path_copy = temp_path.clone();
+            let final_path_copy = final_path.clone();
+
+            match spawn_blocking(move || reflink_or_copy(&temp_path_copy, &final_path_copy)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    eprintln!("Failed to copy file: {error}");
+                    let _ = fs::remove_file(&temp_path).await;
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": "Failed uploading your file",
+                            "id": null
+                        }))
+                    );
+                }
+                Err(error) => {
+                    eprintln!("Failed copying file in blocking task: {error}");
+                    let _ = fs::remove_file(&temp_path).await;
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": "Failed uploading your file",
+                            "id": null
+                        }))
+                    );
+                }
             }
 
             let _ = fs::remove_file(&temp_path).await;
@@ -347,7 +392,18 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, Mult
         }
     }
 
-    // And try to add it to the database too
+    // Check if a file with the same hash doesn't already exist after all of that
+    if let Some(existing_id) = db::hash_exists(&state.connection, &hash).await {
+        let _ = fs::remove_file(&final_path).await;
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "error": null,
+                "id": existing_id
+            }))
+        );
+    }
+
     if let Err(error) = db::add_file(&state.connection, &db::File {
         id: id.clone(),
         hash,
