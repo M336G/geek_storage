@@ -5,8 +5,20 @@ use tokio_util::io::ReaderStream;
 use crate::{AppState, db};
 
 pub async fn get_file(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    // Make sure the ID is 5 characters, is alphanumeric and that it exists
-    if id.len() != 5 || !id.chars().all(|character| character.is_ascii_alphanumeric()) || !db::file_exists(&state.connection, &id).await {
+    // Make sure the ID is 5 characters and is alphanumeric
+    if id.len() != 5 || !id.chars().all(|character| character.is_ascii_alphanumeric()) {
+        return (StatusCode::NOT_FOUND, "This file does not exist!").into_response();
+    }
+
+    // Make sure the file even exists
+    let exists = match db::file_exists(&state.connection, &id).await {
+        Ok(exists) => exists,
+        Err(error) => {
+            eprintln!("Failed to check if file existed: {error}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed checking for file").into_response();
+        }
+    };
+    if !exists {
         return (StatusCode::NOT_FOUND, "This file does not exist!").into_response();
     }
 

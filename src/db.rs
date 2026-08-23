@@ -34,22 +34,20 @@ pub async fn open() -> SqlitePool {
 }
 
 // Check if a file with the provided ID exists
-pub async fn file_exists(pool: &SqlitePool, id: &String) -> bool {
-    sqlx::query("SELECT 1 FROM files WHERE id = ?")
+pub async fn file_exists(pool: &SqlitePool, id: &String) -> Result<bool, sqlx::Error> {
+    Ok(sqlx::query("SELECT 1 FROM files WHERE id = ?")
         .bind(id)
         .fetch_optional(pool)
-        .await
-        .unwrap()
-        .is_some()
+        .await?
+        .is_some())
 }
 
 // Check if a file with the provided hash exists
-pub async fn hash_exists(pool: &SqlitePool, hash: &String) -> Option<String> {
+pub async fn hash_exists(pool: &SqlitePool, hash: &String) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar("SELECT id FROM files WHERE hash = ?")
         .bind(hash)
         .fetch_optional(pool)
         .await
-        .unwrap()
 }
 
 // Get the total amount of files in the database
@@ -71,14 +69,15 @@ pub async fn get_total_size(pool: &SqlitePool) -> u64 {
 }
 
 // Add a new file to the database
-pub async fn add_file(pool: &SqlitePool, file: &File) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO files (id, hash, size) VALUES (?, ?, ?)")
+pub async fn add_file(pool: &SqlitePool, file: &File) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("INSERT OR IGNORE INTO files (id, hash, size) VALUES (?, ?, ?)")
         .bind(&file.id)
         .bind(&file.hash)
         .bind(file.size as i64)
         .execute(pool)
         .await?;
-    Ok(())
+
+    Ok(result.rows_affected() > 0)
 }
 
 // Delete an existing file from the database

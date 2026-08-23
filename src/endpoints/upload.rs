@@ -69,8 +69,21 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, Mult
     }
 
     let mut id = generate_id();
-    while db::file_exists(&state.connection, &id).await {
-        id = generate_id();
+    loop {
+        match db::file_exists(&state.connection, &id).await {
+            Ok(false) => break,
+            Ok(true) => id = generate_id(),
+            Err(error) => {
+                eprintln!("Failed to check if id existed: {error}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "Failed uploading your file",
+                        "id": null
+                    }))
+                );
+            }
+        }
     }
 
     let temp_path = state.temporary_path.join(&id);
@@ -332,15 +345,29 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, Mult
     }
 
     // If the file already exists no need to recreate it
-    if let Some(existing_id) = db::hash_exists(&state.connection, &hash).await {
-        let _ = fs::remove_file(&temp_path).await;
-        return (
-            StatusCode::OK,
-            Json(json!({
-                "error": null,
-                "id": existing_id
-            }))
-        );
+    match db::hash_exists(&state.connection, &hash).await {
+        Ok(Some(existing_id)) => {
+            let _ = fs::remove_file(&temp_path).await;
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "error": null,
+                    "id": existing_id
+                }))
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("Failed to check for existing hash: {error}");
+            let _ = fs::remove_file(&temp_path).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Failed uploading your file",
+                    "id": null
+                }))
+            );
+        }
     }
 
     // First try writing the file to its actual destination
@@ -393,31 +420,57 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, Mult
     }
 
     // Check if a file with the same hash doesn't already exist after all of that
-    if let Some(existing_id) = db::hash_exists(&state.connection, &hash).await {
-        let _ = fs::remove_file(&final_path).await;
-        return (
-            StatusCode::OK,
-            Json(json!({
-                "error": null,
-                "id": existing_id
-            }))
-        );
+    match db::hash_exists(&state.connection, &hash).await {
+        Ok(Some(existing_id)) => {
+            let _ = fs::remove_file(&final_path).await;
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "error": null,
+                    "id": existing_id
+                }))
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("Failed to check for existing hash: {error}");
+            let _ = fs::remove_file(&final_path).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Failed uploading your file",
+                    "id": null
+                }))
+            );
+        }
     }
 
-    if let Err(error) = db::add_file(&state.connection, &db::File {
-        id: id.clone(),
-        hash,
-        size
-    }).await {
-        eprintln!("Failed to add file to database: {error}");
-        let _ = fs::remove_file(&final_path).await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Failed uploading your file",
-                "id": null
-            }))
-        );
+    match db::add_file(&state.connection, &db::File { id: id.clone(), hash: hash.clone(), size }).await {
+        Ok(true) => {}
+        Ok(false) => {
+            let _ = fs::remove_file(&final_path).await;
+            let original_id = db::hash_exists(&state.connection, &hash).await
+                .ok().flatten().unwrap_or(id);
+
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "error": null,
+                    "id": original_id
+                }))
+            );
+        }
+        Err(error) => {
+            eprintln!("Failed to add file to database: {error}");
+            let _ = fs::remove_file(&final_path).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Failed uploading your file",
+                    "id": null
+                }))
+            );
+        }
     }
 
     println!("New file: {id}");

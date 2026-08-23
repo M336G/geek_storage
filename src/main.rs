@@ -163,9 +163,17 @@ async fn main() {
                 while let Ok(Some(entry)) = directory.next_entry().await {
                     let id = entry.file_name().to_string_lossy().to_string();
                         
-                    if !db::file_exists(&unknown_check_state.connection, &id).await {
+                    let exists = match db::file_exists(&unknown_check_state.connection, &id).await {
+                        Ok(exists) => exists,
+                        Err(error) => {
+                            eprintln!("Failed cleaning up unknown file (check error): {error}");
+                            fail += 1;
+                            continue;
+                        }
+                    };
+                    if !exists {
                         if let Err(error) = fs::remove_file(unknown_check_state.storage_path.join(id)).await {
-                            eprintln!("Failed cleaning up unknown file: {error}");
+                            eprintln!("Failed cleaning up unknown file (delete error): {error}");
                             fail += 1;
                             continue;
                         }
