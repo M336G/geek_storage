@@ -327,6 +327,17 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, Mult
         );
     }
 
+    if size == 0 {
+        let _ = fs::remove_file(&temp_path).await;
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Empty files are not allowed",
+                "id": null
+            }))
+        );
+    }
+
     let hash = hex::encode(hasher.finalize());
 
     // Make sure there is enough storage left
