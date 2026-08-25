@@ -1,4 +1,4 @@
-use axum::{Router, extract::DefaultBodyLimit, routing::{get, post}};
+use axum::{Router, extract::DefaultBodyLimit, routing::{get, post, delete}};
 use dotenv::dotenv;
 use reqwest::Client;
 use sqlx::SqlitePool;
@@ -195,6 +195,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(endpoints::health_check))
         .route("/", post(endpoints::upload_file))
+        .route("/{id}", delete(endpoints::delete_file))
         .route("/{id}", get(endpoints::get_file))
         .route("/info", get(endpoints::get_server_info))
         .layer(DefaultBodyLimit::disable())

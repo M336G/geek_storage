@@ -37,7 +37,7 @@ pub fn generate_id() -> String {
         .collect()
 }
 
-pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, MultipartForm(mut multipart): MultipartForm,) -> impl IntoResponse {
+pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, MultipartForm(mut multipart): MultipartForm) -> impl IntoResponse {
     // If TOKEN is set, check if a Bearer was sent along the request
     if let Some(token) = &state.token {
         let authorization = headers

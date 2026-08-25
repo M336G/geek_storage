@@ -25,12 +25,13 @@ cd geek_storage
 ## Usage
 Once you've got your instance running, you may use these endpoints:
 
-| Method | Endpoint | Description                         |
-|--------|----------|-------------------------------------|
-| `GET`  | `/`      | Check if the server's up or not     |
-| `POST` | `/`      | Upload a file (or one from a link)  |
-| `GET`  | `/<id>`  | Download an existing file           |
-| `GET`  | `/info`  | Get information about the server    |
+| Method   | Endpoint | Description                         |
+|----------|----------|-------------------------------------|
+| `GET`    | `/`      | Check if the server's up or not     |
+| `POST`   | `/`      | Upload a file (or one from a link)  |
+| `DELETE` | `/<id>`  | Delete a file                       |
+| `GET`    | `/<id>`  | Download an existing file           |
+| `GET`    | `/info`  | Get information about the server    |
 
 ## License
 This project is licensed under the [MIT License](https://github.com/M336G/geek_storage/blob/main/LICENSE).
