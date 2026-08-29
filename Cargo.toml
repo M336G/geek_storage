@@ -1,7 +1,7 @@
 [package]
 name = "geek_storage"
 description = "Superfast caching server for GEEK Music"
-version = "1.0.1"
+version = "1.0.0"
 edition = "2024"
 license = "MIT"
 
