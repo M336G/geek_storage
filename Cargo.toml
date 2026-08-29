@@ -7,7 +7,9 @@ license = "MIT"
 
 [dependencies]
 axum = { version = "0.8.9", features = ["multipart"] }
+bytes = "1.12.1"
 chrono = "0.4.45"
+dashmap = "6.2.1"
 dotenv = "0.15.0"
 hex = "0.4.3"
 rand = "0.10.2"

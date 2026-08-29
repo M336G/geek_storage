@@ -65,5 +65,10 @@ pub async fn delete_file(State(state): State<AppState>, headers: HeaderMap, Path
         );
     }
 
+    // Delete the file from the cache
+    if let Some(cache) = state.cache.as_ref() {
+        cache.remove(&id);
+    }
+
     (StatusCode::OK, Json(json!({ "error": null })))
 }

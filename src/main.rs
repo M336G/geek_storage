@@ -6,7 +6,7 @@ use tokio::fs;
 use tower_http::compression::CompressionLayer;
 use axum::http::Method;
 use tower_http::cors::{self, CorsLayer};
-use std::env::temp_dir;
+use std::{env::temp_dir, sync::Arc};
 use std::process;
 use std::path::PathBuf;
 use std::{env, time::Duration};
@@ -15,12 +15,16 @@ use tokio::net::TcpListener;
 
 mod db;
 mod endpoints;
+mod cache;
+
+use cache::FileCache;
 
 // Stores some "global variables" which will be used across the whole program
 #[derive(Clone)]
 struct AppState {
     connection: SqlitePool,
     client: Client,
+    cache: Option<Arc<FileCache>>,
     token: Option<String>,
     storage_path: PathBuf,
     temporary_path: PathBuf,
@@ -72,15 +76,27 @@ async fn main() {
         .map(|hours: u64| hours * 60 * 60)
         .unwrap_or(0);
 
+    let max_cache_size: Option<u16> = env::var("MAX_CACHE_SIZE")
+        .ok()
+        .and_then(|size| size.parse().ok());
+    if let Some(size) = &max_cache_size {
+        println!("Max file cache size set to {size} MB!");
+    } else {
+        println!("File cache disabled!");
+    }
+
     let client = Client::builder()
         .user_agent(format!("GeekStorage/{}", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(10))
         .build()
         .unwrap();
 
+    let cache = max_cache_size.map(|mb| Arc::new(FileCache::new(mb)));
+
     let state = AppState {
         connection: db::open().await,
         client,
+        cache,
         token,
         storage_path,
         temporary_path: temp_dir().join("geek_storage"),
@@ -99,16 +115,20 @@ async fn main() {
                 let mut fail = 0;
 
                 for expired_file in &expired_files {
-                    if let Err(error) = db::delete_file(&expired_check_state.connection, expired_file).await {
+                    if let Err(error) = db::delete_file(&expired_check_state.connection, &expired_file).await {
                         eprintln!("Failed cleaning up expired file: {error}");
                         fail += 1;
                         continue;
                     }
 
-                    if let Err(error) = fs::remove_file(expired_check_state.storage_path.join(expired_file)).await {
+                    if let Err(error) = fs::remove_file(expired_check_state.storage_path.join(&expired_file)).await {
                         eprintln!("Failed cleaning up expired file: {error}");
                         fail += 1;
                         continue;
+                    }
+
+                    if let Some(cache) = expired_check_state.cache.as_ref() {
+                        cache.remove(expired_file);
                     }
 
                     success += 1;
