@@ -1,9 +1,10 @@
 use axum::{Json, extract::{FromRequest, Multipart, Request, State}, http::{HeaderMap, StatusCode}, response::IntoResponse};
+use essi_ffmpeg::FFmpeg;
 use reflink::reflink_or_copy;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::future::Future;
-use tokio::{fs::{self, File}, io::AsyncWriteExt, task::spawn_blocking};
+use std::{future::Future, path::Path, process::Stdio};
+use tokio::{fs::{self, File}, io::{AsyncReadExt, AsyncWriteExt}, task::spawn_blocking};
 use rand::{RngExt, distr::Alphanumeric};
 
 use crate::{AppState, db};
@@ -35,6 +36,55 @@ pub fn generate_id() -> String {
         .take(5)
         .map(char::from)
         .collect()
+}
+
+async fn is_audio_file(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path).await else { return false };
+    let mut buffer = [0u8; 8192];
+    let Ok(read) = file.read(&mut buffer).await else { return false };
+
+    infer::get(&buffer[..read])
+        .is_some_and(|kind| kind.matcher_type() == infer::MatcherType::Audio)
+}
+
+// basically: ffmpeg -i input -c:a libopus -b:a 128k -ar 48000 output
+async fn compress_audio(input: &Path, output: &Path) -> bool {
+    let input = input.to_path_buf();
+    let output = output.to_path_buf();
+
+    spawn_blocking(move || {
+        let command = FFmpeg::new()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .input_with_file(input).done()
+            .output_as_file(output)
+                .format("ogg")
+                .codec_audio("libopus")
+                .args([
+                    "-vn", // Disables any video stream
+                    "-b:a", "128k", // Sets the audio bitrate to 128kbps
+                    "-ar", "48000" // Sets the audio sample rate to 48kHz
+                    ])
+                .done()
+            .start();
+
+        match command {
+            Ok(mut command) => match command.wait() {
+                Ok(status) => status.success(),
+                Err(error) => {
+                    eprintln!("Failed waiting for ffmpeg: {error}");
+                    false
+                }
+            },
+            Err(error) => {
+                eprintln!("Failed starting ffmpeg: {error}");
+                false
+            }
+        }
+    })
+    .await
+    .unwrap_or(false)
 }
 
 pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, MultipartForm(mut multipart): MultipartForm) -> impl IntoResponse {
@@ -378,6 +428,33 @@ pub async fn upload_file(State(state): State<AppState>, headers: HeaderMap, Mult
                     "id": null
                 }))
             );
+        }
+    }
+
+    // If audio compression is enabled and the file is an audio file, compress it
+    if state.compress_audio && is_audio_file(&temp_path).await {
+        let compressed_path = state.temporary_path.join(format!("{id}.opus"));
+
+        if compress_audio(&temp_path, &compressed_path).await {
+            match fs::metadata(&compressed_path).await {
+                // If the re-encoded file is bigger than the original (can happen cuz
+                // it's opus at 128kbps), just keep the original one
+                Ok(metadata) if metadata.len() > 0 && metadata.len() < size => {
+                    match fs::rename(&compressed_path, &temp_path).await {
+                        Ok(_) => size = metadata.len(),
+                        Err(error) => {
+                            eprintln!("Failed replacing file with compressed audio: {error}");
+                            let _ = fs::remove_file(&compressed_path).await;
+                        }
+                    }
+                }
+                _ => {
+                    let _ = fs::remove_file(&compressed_path).await;
+                }
+            }
+        } else {
+            // If compression failed just keep the original file
+            let _ = fs::remove_file(&compressed_path).await;
         }
     }
 

@@ -1,5 +1,6 @@
 use axum::{Router, extract::DefaultBodyLimit, routing::{get, post, delete}};
 use dotenv::dotenv;
+use essi_ffmpeg::FFmpeg;
 use reqwest::Client;
 use sqlx::SqlitePool;
 use tokio::fs;
@@ -30,7 +31,8 @@ struct AppState {
     temporary_path: PathBuf,
     max_storage_limit: u64,
     max_file_size: u64,
-    max_unaccessed_time: u64
+    max_unaccessed_time: u64,
+    compress_audio: bool
 }
 
 #[tokio::main]
@@ -44,6 +46,9 @@ async fn main() {
         .unwrap_or(8912);
 
     let token = env::var("TOKEN").ok();
+    if token.is_none() {
+        println!("No TOKEN set! Do NOT use this in production.");
+    }
 
     let storage_path: PathBuf = match env::var("STORAGE_PATH") {
         Ok(path) => path.into(),
@@ -81,8 +86,26 @@ async fn main() {
         .and_then(|size| size.parse().ok());
     if let Some(size) = &max_cache_size {
         println!("Max file cache size set to {size} MB!");
-    } else {
-        println!("File cache disabled!");
+    }
+
+    let compress_audio = env::var("COMPRESS_AUDIO").is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+    if compress_audio {
+        match FFmpeg::auto_download().await {
+            Ok(Some((handle, mut progress))) => {
+                tokio::spawn(async move { while progress.recv().await.is_some() {} });
+                if !matches!(handle.await, Ok(Ok(()))) {
+                    eprintln!("Failed downloading FFmpeg!");
+                    process::exit(1);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("Failed preparing FFmpeg: {error}");
+                process::exit(1);
+            }
+        }
+
+        println!("Audio compression enabled!");
     }
 
     let client = Client::builder()
@@ -102,7 +125,8 @@ async fn main() {
         temporary_path: temp_dir().join("geek_storage"),
         max_storage_limit,
         max_file_size,
-        max_unaccessed_time
+        max_unaccessed_time,
+        compress_audio
     };
 
     if max_unaccessed_time > 0 {
